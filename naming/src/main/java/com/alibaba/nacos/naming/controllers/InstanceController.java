@@ -21,7 +21,10 @@ import com.alibaba.fastjson.JSONObject;
 import com.alibaba.nacos.api.common.Constants;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.naming.CommonParams;
+import com.alibaba.nacos.api.naming.NamingResponseCode;
 import com.alibaba.nacos.api.naming.utils.NamingUtils;
+import com.alibaba.nacos.core.auth.ActionTypes;
+import com.alibaba.nacos.core.auth.Secured;
 import com.alibaba.nacos.core.utils.WebUtils;
 import com.alibaba.nacos.naming.core.Instance;
 import com.alibaba.nacos.naming.core.Service;
@@ -29,11 +32,13 @@ import com.alibaba.nacos.naming.core.ServiceManager;
 import com.alibaba.nacos.naming.healthcheck.RsInfo;
 import com.alibaba.nacos.naming.misc.Loggers;
 import com.alibaba.nacos.naming.misc.SwitchDomain;
+import com.alibaba.nacos.naming.misc.SwitchEntry;
 import com.alibaba.nacos.naming.misc.UtilsAndCommons;
 import com.alibaba.nacos.naming.push.ClientInfo;
 import com.alibaba.nacos.naming.push.DataSource;
 import com.alibaba.nacos.naming.push.PushService;
 import com.alibaba.nacos.naming.web.CanDistro;
+import com.alibaba.nacos.naming.web.NamingResourceParser;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.BooleanUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -84,8 +89,10 @@ public class InstanceController {
         }
     };
 
+
     @CanDistro
     @PostMapping
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.WRITE)
     public String register(HttpServletRequest request) throws Exception {
 
         String serviceName = WebUtils.required(request, CommonParams.SERVICE_NAME);
@@ -97,6 +104,7 @@ public class InstanceController {
 
     @CanDistro
     @DeleteMapping
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.WRITE)
     public String deregister(HttpServletRequest request) throws Exception {
         Instance instance = getIPAddress(request);
         String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID,
@@ -116,6 +124,7 @@ public class InstanceController {
 
     @CanDistro
     @PutMapping
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.WRITE)
     public String update(HttpServletRequest request) throws Exception {
         String serviceName = WebUtils.required(request, CommonParams.SERVICE_NAME);
         String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID, Constants.DEFAULT_NAMESPACE_ID);
@@ -135,6 +144,7 @@ public class InstanceController {
 
     @CanDistro
     @PatchMapping
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.WRITE)
     public String patch(HttpServletRequest request) throws Exception {
         String serviceName = WebUtils.required(request, CommonParams.SERVICE_NAME);
         String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID, Constants.DEFAULT_NAMESPACE_ID);
@@ -154,8 +164,8 @@ public class InstanceController {
         if (StringUtils.isNotBlank(metadata)) {
             instance.setMetadata(UtilsAndCommons.parseMetadata(metadata));
         }
-        String app = WebUtils.optional(request, "app",  StringUtils.EMPTY);
-        if(StringUtils.isNotBlank(app)){
+        String app = WebUtils.optional(request, "app", StringUtils.EMPTY);
+        if (StringUtils.isNotBlank(app)) {
             instance.setApp(app);
         }
         String weight = WebUtils.optional(request, "weight", StringUtils.EMPTY);
@@ -178,6 +188,7 @@ public class InstanceController {
     }
 
     @GetMapping("/list")
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.READ)
     public JSONObject list(HttpServletRequest request) throws Exception {
 
         String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID,
@@ -202,6 +213,7 @@ public class InstanceController {
     }
 
     @GetMapping
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.READ)
     public JSONObject detail(HttpServletRequest request) throws Exception {
 
         String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID,
@@ -245,6 +257,7 @@ public class InstanceController {
 
     @CanDistro
     @PutMapping("/beat")
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.WRITE)
     public JSONObject beat(HttpServletRequest request) throws Exception {
 
         JSONObject result = new JSONObject();
@@ -253,28 +266,39 @@ public class InstanceController {
         String serviceName = WebUtils.required(request, CommonParams.SERVICE_NAME);
         String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID,
             Constants.DEFAULT_NAMESPACE_ID);
-        String beat = WebUtils.required(request, "beat");
-        RsInfo clientBeat = JSON.parseObject(beat, RsInfo.class);
+        String clusterName = WebUtils.optional(request, CommonParams.CLUSTER_NAME,
+            UtilsAndCommons.DEFAULT_CLUSTER_NAME);
+        String ip = WebUtils.optional(request, "ip", StringUtils.EMPTY);
+        int port = Integer.parseInt(WebUtils.optional(request, "port", "0"));
+        String beat = WebUtils.optional(request, "beat", StringUtils.EMPTY);
 
-        if (!switchDomain.isDefaultInstanceEphemeral() && !clientBeat.isEphemeral()) {
-            return result;
+        RsInfo clientBeat = null;
+        if (StringUtils.isNotBlank(beat)) {
+            clientBeat = JSON.parseObject(beat, RsInfo.class);
         }
 
-        if (StringUtils.isBlank(clientBeat.getCluster())) {
-            clientBeat.setCluster(UtilsAndCommons.DEFAULT_CLUSTER_NAME);
+        if (clientBeat != null) {
+            if (StringUtils.isNotBlank(clientBeat.getCluster())) {
+                clusterName = clientBeat.getCluster();
+            } else {
+                // fix #2533
+                clientBeat.setCluster(clusterName);
+            }
+            ip = clientBeat.getIp();
+            port = clientBeat.getPort();
         }
-
-        String clusterName = clientBeat.getCluster();
 
         if (Loggers.SRV_LOG.isDebugEnabled()) {
             Loggers.SRV_LOG.debug("[CLIENT-BEAT] full arguments: beat: {}, serviceName: {}", clientBeat, serviceName);
         }
 
-        Instance instance = serviceManager.getInstance(namespaceId, serviceName, clientBeat.getCluster(),
-            clientBeat.getIp(),
-            clientBeat.getPort());
+        Instance instance = serviceManager.getInstance(namespaceId, serviceName, clusterName, ip, port);
 
         if (instance == null) {
+            if (clientBeat == null) {
+                result.put(CommonParams.CODE, NamingResponseCode.RESOURCE_NOT_FOUND);
+                return result;
+            }
             instance = new Instance();
             instance.setPort(clientBeat.getPort());
             instance.setIp(clientBeat.getIp());
@@ -294,9 +318,17 @@ public class InstanceController {
             throw new NacosException(NacosException.SERVER_ERROR,
                 "service not found: " + serviceName + "@" + namespaceId);
         }
-
+        if (clientBeat == null) {
+            clientBeat = new RsInfo();
+            clientBeat.setIp(ip);
+            clientBeat.setPort(port);
+            clientBeat.setCluster(clusterName);
+        }
         service.processClientBeat(clientBeat);
+
+        result.put(CommonParams.CODE, NamingResponseCode.OK);
         result.put("clientBeatInterval", instance.getInstanceHeartBeatInterval());
+        result.put(SwitchEntry.LIGHT_BEAT_ENABLED, switchDomain.isLightBeatEnabled());
         return result;
     }
 
